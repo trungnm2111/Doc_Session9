@@ -67,6 +67,7 @@ The **system call interface** is the set of all system calls the kernel provides
 
 **ioctl** (input/output control) is a general-purpose system call for sending device-specific control commands through a file descriptor: `ioctl(fd, request, arg)`.
 
+![alt text](image-3.png)
 ***Core ideas***
 
 1. **Problem.** In UNIX "everything is a file", but `read()`/`write()` only move bytes. Devices also need operations like setting a serial port's baud rate or reading the terminal size. Adding one syscall per such operation would bloat the kernel.
@@ -74,7 +75,7 @@ The **system call interface** is the set of all system calls the kernel provides
 3. **Mechanism.** The kernel uses the fd to find the driver and calls the driver's ioctl handler (registered in `file_operations`), which is usually a `switch (request)`. Pointer data is copied with `copy_from_user` / `copy_to_user`.
 4. **Request codes** are built with the `_IO`, `_IOR`, `_IOW`, `_IOWR` macros, encoding a driver ID, command number, data direction, and data size, to avoid collisions.
 
-## Key takeaways
+***Key takeaways***
 
 - There is no common standard for commands; read the driver's header or docs.
 - It is hard to type-check and audit, so newer kernel interfaces often prefer sysfs or netlink, though ioctl is still widely used.
@@ -82,8 +83,8 @@ The **system call interface** is the set of all system calls the kernel provides
 # 4. proc file system interface
 
 **/proc** is a virtual (pseudo) file system mounted at `/proc`. It exposes kernel and process information as files you can read (and sometimes write) with normal file operations or tools like `cat` and `echo`.
-
-## Core ideas
+![alt text](image-4.png)
+***Core ideas***
 
 1. **Problem.** Programs need kernel information (memory usage, open files of a process) and sometimes need to tune kernel parameters. One syscall per item would not scale, so the kernel exposes them as files.
 2. **Mechanism.** Nothing is stored on disk. When you `read()` a /proc file, the kernel calls a handler that formats the current data as text. Writing to some files calls a handler that changes a kernel parameter.
