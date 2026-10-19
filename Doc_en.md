@@ -125,3 +125,118 @@ The **system call interface** is the set of all system calls the kernel provides
 - Structured binary data: more precise than /proc text, but must be parsed by format.
 - No device file needed, and communication works in both directions.
 - Messages can be dropped if the receive queue overflows, so programs must handle that.
+
+# 6. Lab
+
+## 6.1 User-space app that controls an existing module through system calls
+
+***Goal***
+
+Write a user-space program that controls an LED. The LED is managed by a driver in kernel space. User code cannot call driver functions directly, so the program must go through the kernel using **system calls**.
+
+In this lab the system calls are made directly with `syscall(2)` instead of the usual libc wrappers such as `open()` and `write()`. This makes every step between the app and the driver visible.
+
+***How the two sides connect***
+
+- **Driver side (provided).** `misc_register()` creates the device node `/dev/myled`. The driver registers `myled_fops`, a `struct file_operations` (a table of callback function pointers). It tells the kernel: on write, call `myled_write`; on read, call `myled_read`.
+- **App side (to be written).** The app treats `/dev/myled` as an ordinary file and uses the standard sequence: open, write or read, close.
+- **Bridge.** The **VFS** (Virtual File System) is the kernel layer that receives every file-related syscall and routes it to the driver that owns the file.
+
+***Flow of a command***
+
+Example: the app turns the LED on.
+
+```
+App: syscall(SYS_write, fd, "1", 1)
+        ↓  (user space → kernel space)
+VFS: looks up the file for fd → /dev/myled
+        ↓
+Kernel calls myled_write() in the driver
+        ↓
+Driver: copy_from_user() fetches '1' → gpiod_set_value_cansleep(led, 1)
+        ↓
+GPIO pin goes high → LED on
+        ↓
+myled_write() returns count (1) → kernel returns it to the app
+```
+
+If the driver returns a negative code (e.g. `-EINVAL`), the app gets `-1` and the positive error code is stored in `errno`.
+
+***Program structure***
+
+Split the program into small functions, one job each:
+
+| Function | Job |
+|---|---|
+| `raw_open()` | Wraps `syscall(SYS_openat, ...)` to open `/dev/myled` |
+| `led_cmd(cmd)` | Opens the file, writes one command character, closes it; returns `0` on success or `-errno` on error |
+| `led_get()` | Opens the file, reads the state, closes it; returns `0` or `1` |
+| `main()` | Runs the test scenario: read initial state, turn on, read, turn off, read, then send an invalid command to observe the error |
+
+## 6.2 User-space app that controls the myled module through ioctl
+
+***Goal***
+
+Write a user-space program that sends control commands to the driver in kernel space using **ioctl**.
+
+In 6.1 the app controlled the LED by writing the characters `'0'`, `'1'`, `'2'` with `write()`. That treats everything as a byte stream, and the meaning of each character is an implicit agreement between the two sides. ioctl replaces this with explicit commands: each one has its own request code, a defined argument type, and a declared data direction.
+
+***Components***
+
+This lab adds one component compared to 6.1:
+
+- **Shared header `myled_ioctl.h`.** Defines the request codes. Both the driver and the app `#include` it so they agree on the codes. If each side defined its own, the codes could drift apart and commands would be misinterpreted.
+- **Driver side (to be modified).** Add a `myled_ioctl()` handler and register it in the `.unlocked_ioctl` field of `myled_fops`. The driver currently has no ioctl callback, so without this change the kernel returns `ENOTTY`.
+- **App side (to be written).** Open `/dev/myled` and call `ioctl()` with the codes from the shared header.
+
+The bridge between app and driver is still the VFS.
+
+***ioctl request code layout***
+
+A request code is a 32-bit number made of four fields:
+
+| Field | Meaning | In this lab |
+|---|---|---|
+| type (magic) | Driver identifier, so codes do not collide with other drivers | `0xE7` |
+| nr | Command number within the driver | `1`, `2`, `3` |
+| size | Size of the argument type | 4 bytes (`int`) |
+| dir | Direction: none, user → kernel, kernel → user | Per command |
+
+Defined commands:
+
+| Command | Macro | Direction | Meaning |
+|---|---|---|---|
+| `MYLED_IOC_GET_STATE` | `_IOR` | kernel → user | Driver returns the LED state to the app |
+| `MYLED_IOC_SET_STATE` | `_IOW` | user → kernel | App sends `0` or `1` to the driver |
+| `MYLED_IOC_TOGGLE` | `_IO` | none | Inverts the LED state, no argument |
+
+Direction is named from the app's point of view, so "read" (`R`) means the app reads data from the driver.
+
+***Flow of a command***
+
+Example: the app turns the LED on with `SET_STATE`.
+
+```
+App: ioctl(fd, MYLED_IOC_SET_STATE, &on)      (on = 1)
+        ↓  (user space → kernel space)
+VFS: looks up the file for fd → /dev/myled
+        ↓
+Kernel calls myled_ioctl(filp, cmd, arg)
+        (arg is the user-space address of `on`)
+        ↓
+Driver: switch (cmd) → SET_STATE case
+        get_user() copies the value at arg into val
+        checks val is 0 or 1 → gpiod_set_value_cansleep()
+        ↓
+GPIO pin goes high → LED on
+        ↓
+myled_ioctl() returns 0 → ioctl() in the app returns 0
+```
+
+For `GET_STATE` the data flows the other way: the driver uses `put_user()` to write the value to address `arg` in the app's memory.
+
+If the driver returns a negative code (e.g. `-EINVAL`, `-ENOTTY`), the app gets `-1` and the positive error code is stored in `errno`.
+
+***Why get_user / put_user***
+
+`arg` is a user-space address. The kernel must not dereference it directly: the address may be invalid or malicious and could crash the kernel. These helpers safely copy a small value and validate the address. If the address is invalid they return non-zero, and the driver returns `-EFAULT`.
